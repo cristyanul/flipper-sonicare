@@ -72,14 +72,39 @@ static NfcCommand sonicare_scene_reset_poller_callback(NfcGenericEvent event, vo
         view_dispatcher_send_custom_event(app->view_dispatcher, NfcCustomEventWorkerExit);
         command = NfcCommandStop;
     } else if(ev->type == MfUltralightPollerEventTypeReadSuccess) {
-        // Card has no password protection or auth was skipped; try direct write.
-        FURI_LOG_I("sonicare_scene_reset", "ReadSuccess without prior auth, trying write");
+        FURI_LOG_I("sonicare_scene_reset", "ReadSuccess without prior auth, authenticating first");
         MfUltralightPoller* poller = (MfUltralightPoller*)event.instance;
-        MfUltralightPage page = {.data = {0x00, 0x00, 0x02, 0x00}};
-        MfUltralightError err =
-            mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE, &page);
-        app->reset_state =
-            (err == MfUltralightErrorNone) ? SonicareResetStateSuccess : SonicareResetStateFailedWrite;
+
+        uint32_t pwd = get_sonicare_password(app->sonicare_uid, app->sonicare_mfg);
+        MfUltralightPollerAuthContext auth_ctx = {};
+        auth_ctx.password.data[0] = (pwd >> 24) & 0xFF;
+        auth_ctx.password.data[1] = (pwd >> 16) & 0xFF;
+        auth_ctx.password.data[2] = (pwd >> 8) & 0xFF;
+        auth_ctx.password.data[3] = (pwd >> 0) & 0xFF;
+
+        MfUltralightError auth_err = mf_ultralight_poller_auth_pwd(poller, &auth_ctx);
+        if(auth_err != MfUltralightErrorNone) {
+            FURI_LOG_E("sonicare_scene_reset", "Auth failed in ReadSuccess: %d", auth_err);
+            app->reset_state = SonicareResetStateFailedAuth;
+        } else {
+            const MfUltralightData* ul_data = app->nfc_data;
+            MfUltralightPage page = {.data = {0x00, 0x00, 0x02, 0x00}};
+            page.data[2] = ul_data->page[SONICARE_PAGE_USAGE].data[2];
+            page.data[3] = ul_data->page[SONICARE_PAGE_USAGE].data[3];
+
+            MfUltralightError err =
+                mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE, &page);
+            if(err == MfUltralightErrorNone) {
+                MfUltralightPage page_zero = {.data = {0x00, 0x00, 0x00, 0x00}};
+                mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 1, &page_zero);
+                mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 2, &page_zero);
+                FURI_LOG_I("sonicare_scene_reset", "Usage counter reset OK");
+                app->reset_state = SonicareResetStateSuccess;
+            } else {
+                FURI_LOG_E("sonicare_scene_reset", "Write failed: %d", err);
+                app->reset_state = SonicareResetStateFailedWrite;
+            }
+        }
         view_dispatcher_send_custom_event(app->view_dispatcher, NfcCustomEventWorkerExit);
         command = NfcCommandStop;
     }

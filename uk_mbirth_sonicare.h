@@ -66,6 +66,8 @@ struct Sonicare {
     SonicareResetState reset_state;
     uint8_t sonicare_uid[7];
     uint8_t sonicare_mfg[10];
+    uint8_t quick_reset_last_uid[7];
+    bool quick_reset_has_last_uid;
 };
 
 typedef enum {
