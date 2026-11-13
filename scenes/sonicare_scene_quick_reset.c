@@ -34,74 +34,17 @@ static NfcCommand sonicare_scene_quick_reset_poller_callback(NfcGenericEvent eve
     }
 
     const MfUltralightPollerEvent* ev = event.event_data;
-    NfcCommand command = NfcCommandContinue;
 
-    if(ev->type == MfUltralightPollerEventTypeRequestMode) {
-        ev->data->poller_mode = MfUltralightPollerModeRead;
-    } else if(ev->type == MfUltralightPollerEventTypeAuthRequest) {
-        // If tag requires authentication to read protected pages:
-        const MfUltralightData* ul_data = (const MfUltralightData*)nfc_poller_get_data(app->poller);
-        if(ul_data && ul_data->iso14443_3a_data && ul_data->pages_read >= 0x24) {
-            uint8_t uid[7];
-            uint8_t mfg[10];
-            memcpy(uid, ul_data->iso14443_3a_data->uid, 7);
-            memcpy(mfg + 0, ul_data->page[0x21].data + 2, 2);
-            memcpy(mfg + 2, ul_data->page[0x22].data, 4);
-            memcpy(mfg + 6, ul_data->page[0x23].data, 4);
-
-            if(sonicare_quick_reset_validate_mfg(mfg)) {
-                uint32_t pwd = get_sonicare_password(uid, mfg);
-                FURI_LOG_I(TAG, "AuthRequest - providing password %08lX", pwd);
-                ev->data->auth_context.password.data[0] = (pwd >> 24) & 0xFF;
-                ev->data->auth_context.password.data[1] = (pwd >> 16) & 0xFF;
-                ev->data->auth_context.password.data[2] = (pwd >> 8) & 0xFF;
-                ev->data->auth_context.password.data[3] = (pwd >> 0) & 0xFF;
-                ev->data->auth_context.skip_auth = false;
-                return NfcCommandContinue;
-            }
-        }
-        // If MFG not yet available, skip auth so read can complete first
-        ev->data->auth_context.skip_auth = true;
-    } else if(ev->type == MfUltralightPollerEventTypeAuthSuccess) {
-        // Handled if card used AuthRequest path
-        FURI_LOG_I(TAG, "AuthSuccess - resetting pages 0x24-0x26");
-        const MfUltralightData* ul_data = (const MfUltralightData*)nfc_poller_get_data(app->poller);
+    // Like sonicare_scene_read.c, ignore intermediate AuthRequest/AuthFailed events during
+    // initial read. Wait until the entire tag (43 pages) has been read successfully.
+    if(ev->type == MfUltralightPollerEventTypeReadSuccess) {
         MfUltralightPoller* poller = (MfUltralightPoller*)event.instance;
+        nfc_device_set_data(app->nfc_device, NfcProtocolMfUltralight, nfc_poller_get_data(app->poller));
+        const MfUltralightData* ul_data = nfc_device_get_data(app->nfc_device, NfcProtocolMfUltralight);
 
-        MfUltralightPage page24 = {.data = {0x00, 0x00, 0x02, 0x00}};
-        if(ul_data) {
-            page24.data[2] = ul_data->page[SONICARE_PAGE_USAGE].data[2];
-            page24.data[3] = ul_data->page[SONICARE_PAGE_USAGE].data[3];
-        }
-        MfUltralightPage page_zero = {.data = {0x00, 0x00, 0x00, 0x00}};
-
-        MfUltralightError err24 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE, &page24);
-        MfUltralightError err25 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 1, &page_zero);
-        MfUltralightError err26 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 2, &page_zero);
-
-        if(err24 == MfUltralightErrorNone && err25 == MfUltralightErrorNone && err26 == MfUltralightErrorNone) {
-            FURI_LOG_I(TAG, "Quick Reset Success!");
-            if(ul_data && ul_data->iso14443_3a_data) {
-                memcpy(app->quick_reset_last_uid, ul_data->iso14443_3a_data->uid, 7);
-                app->quick_reset_has_last_uid = true;
-            }
-            view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetSuccess);
-        } else {
-            FURI_LOG_E(TAG, "Write failed");
-            view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetFailed);
-        }
-        command = NfcCommandStop;
-    } else if(ev->type == MfUltralightPollerEventTypeReadSuccess) {
-        // Sonicare heads are unprotected for reading (PROT=0), so the poller finishes
-        // read without needing auth. We authenticate now and write.
-        FURI_LOG_I(TAG, "ReadSuccess - authenticating before writing");
-        MfUltralightPoller* poller = (MfUltralightPoller*)event.instance;
-        const MfUltralightData* ul_data = (const MfUltralightData*)nfc_poller_get_data(app->poller);
-
-        if(!ul_data || !ul_data->iso14443_3a_data || ul_data->pages_read < 0x24) {
-            FURI_LOG_W(TAG, "Incomplete read data");
-            view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetFailed);
-            return NfcCommandStop;
+        if(!ul_data || !ul_data->iso14443_3a_data || ul_data->pages_read < 43) {
+            // Keep reading until all 43 pages are loaded
+            return NfcCommandContinue;
         }
 
         uint8_t uid[7];
@@ -111,13 +54,13 @@ static NfcCommand sonicare_scene_quick_reset_poller_callback(NfcGenericEvent eve
         memcpy(mfg + 2, ul_data->page[0x22].data, 4);
         memcpy(mfg + 6, ul_data->page[0x23].data, 4);
 
-        // Prevent repeated resets while the same head is still held in place
+        // Guard: don't reset the same head repeatedly if held against Flipper
         if(app->quick_reset_has_last_uid && memcmp(uid, app->quick_reset_last_uid, 7) == 0) {
             return NfcCommandContinue;
         }
 
         if(!sonicare_quick_reset_validate_mfg(mfg)) {
-            FURI_LOG_W(TAG, "Invalid MFG string, aborting auth for safety");
+            FURI_LOG_W(TAG, "Not a valid Sonicare head (invalid MFG)");
             view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetFailed);
             return NfcCommandStop;
         }
@@ -142,29 +85,26 @@ static NfcCommand sonicare_scene_quick_reset_poller_callback(NfcGenericEvent eve
         MfUltralightPage page24 = {.data = {0x00, 0x00, 0x02, 0x00}};
         page24.data[2] = ul_data->page[SONICARE_PAGE_USAGE].data[2];
         page24.data[3] = ul_data->page[SONICARE_PAGE_USAGE].data[3];
-        MfUltralightPage page_zero = {.data = {0x00, 0x00, 0x00, 0x00}};
 
         MfUltralightError err24 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE, &page24);
-        MfUltralightError err25 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 1, &page_zero);
-        MfUltralightError err26 = mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 2, &page_zero);
+        if(err24 == MfUltralightErrorNone) {
+            MfUltralightPage page_zero = {.data = {0x00, 0x00, 0x00, 0x00}};
+            mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 1, &page_zero);
+            mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 2, &page_zero);
 
-        if(err24 == MfUltralightErrorNone && err25 == MfUltralightErrorNone && err26 == MfUltralightErrorNone) {
-            FURI_LOG_I(TAG, "Quick Reset Success!");
+            FURI_LOG_I(TAG, "Quick reset success!");
             memcpy(app->quick_reset_last_uid, uid, 7);
             app->quick_reset_has_last_uid = true;
             view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetSuccess);
         } else {
-            FURI_LOG_E(TAG, "Write failed: 24=%d, 25=%d, 26=%d", err24, err25, err26);
+            FURI_LOG_E(TAG, "Write failed: %d", err24);
             view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetFailed);
         }
-        command = NfcCommandStop;
-    } else if(ev->type == MfUltralightPollerEventTypeAuthFailed) {
-        FURI_LOG_E(TAG, "Auth failed");
-        view_dispatcher_send_custom_event(app->view_dispatcher, SonicareCustomEventQuickResetAuthFailed);
-        command = NfcCommandStop;
+
+        return NfcCommandStop;
     }
 
-    return command;
+    return NfcCommandContinue;
 }
 
 void sonicare_scene_quick_reset_on_enter(void* context) {
@@ -214,7 +154,6 @@ bool sonicare_scene_quick_reset_on_event(void* context, SceneManagerEvent event)
             popup_set_header(popup, "Write Error", 83, 8, AlignCenter, AlignTop);
             popup_set_text(popup, "Failed to write\n\nPress Back to exit", 83, 27, AlignCenter, AlignTop);
 
-            // Stop poller on failure to prevent infinite vibration loop
             if(app->poller) {
                 nfc_poller_stop(app->poller);
                 nfc_poller_free(app->poller);
@@ -226,9 +165,8 @@ bool sonicare_scene_quick_reset_on_event(void* context, SceneManagerEvent event)
             notification_message(app->notifications, &sequence_error);
             popup_reset(popup);
             popup_set_header(popup, "Auth Failed", 83, 8, AlignCenter, AlignTop);
-            popup_set_text(popup, "AUTHLIM protection\n\nPress Back to exit", 83, 27, AlignCenter, AlignTop);
+            popup_set_text(popup, "Unlock key failed\n\nPress Back to exit", 83, 27, AlignCenter, AlignTop);
 
-            // Stop poller on auth fail to protect card from repeated attempts
             if(app->poller) {
                 nfc_poller_stop(app->poller);
                 nfc_poller_free(app->poller);
