@@ -81,6 +81,7 @@ typedef enum {
 
 typedef enum {
     SonicareMenuIndexRead,
+    SonicareMenuIndexQuickReset,
     SonicareMenuIndexAbout,
     SonicareMenuIndexSaved,
     SonicareMenuIndexAddManually,
@@ -89,6 +90,9 @@ typedef enum {
 
 typedef enum {
     NfcCustomEventWorkerExit,
+    SonicareCustomEventQuickResetSuccess,
+    SonicareCustomEventQuickResetFailed,
+    SonicareCustomEventQuickResetAuthFailed,
 } NfcCustomEvent;
 
 void sonicare_widget_callback(GuiButtonType result, InputType type, void* context);

@@ -52,7 +52,11 @@ static NfcCommand sonicare_scene_reset_poller_callback(NfcGenericEvent event, vo
         MfUltralightError err =
             mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE, &page);
 
+        // Also clear session counter and last-brush timestamp (pages 0x25 and 0x26)
         if(err == MfUltralightErrorNone) {
+            MfUltralightPage page_zero = {.data = {0x00, 0x00, 0x00, 0x00}};
+            mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 1, &page_zero);
+            mf_ultralight_poller_write_page(poller, SONICARE_PAGE_USAGE + 2, &page_zero);
             FURI_LOG_I("sonicare_scene_reset", "Usage counter reset OK");
             app->reset_state = SonicareResetStateSuccess;
         } else {
