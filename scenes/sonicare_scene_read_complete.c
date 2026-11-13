@@ -179,14 +179,13 @@ void sonicare_scene_read_complete_on_enter(void* context) {
     
     // Manufacturing Code
     furi_string_cat_str(temp_str, "MFG: ");
-    FuriString* serial_no = furi_string_alloc();
-    furi_string_cat_str(serial_no, (char*)(ul_data->page[0x21].data));
-    furi_string_right(serial_no, 2);
-    furi_string_cat(temp_str, serial_no);
+    for(size_t i = 0; i < 10; i++) {
+        furi_string_push_back(temp_str, (char)app->sonicare_mfg[i]);
+    }
     furi_string_cat_printf(temp_str, "\n");
 
     // NFC password
-    uint32_t unlock_pwd_big = get_sonicare_password((uint8_t*)ul_data->iso14443_3a_data->uid, (uint8_t*)furi_string_get_cstr(serial_no));
+    uint32_t unlock_pwd_big = get_sonicare_password(app->sonicare_uid, app->sonicare_mfg);
     FURI_LOG_D("sonicare_scene_read_complete", "NFC unlock password: 0x%08lx", unlock_pwd_big);
     uint8_t unlock_pwd[4];
     memcpy(unlock_pwd, &unlock_pwd_big, sizeof(unlock_pwd_big));
@@ -198,7 +197,6 @@ void sonicare_scene_read_complete_on_enter(void* context) {
     widget_add_text_scroll_element(widget, 0, 0, 128, 64, furi_string_get_cstr(temp_str));
 
     furi_string_free(temp_str);
-    furi_string_free(serial_no);
 
     widget_add_button_element(
         widget,
